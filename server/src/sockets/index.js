@@ -5,6 +5,32 @@ const Chat = require('../models/Chat');
 const messageService = require('../services/messageService');
 
 const onlineUsers = new Map();
+const activeCalls = new Map();
+
+const getUserRoom = (userId) => `user:${userId}`;
+
+const isUserBusy = (userId) => {
+  const idStr = userId.toString();
+  for (const call of activeCalls.values()) {
+    if (call.callerId === idStr || call.calleeId === idStr) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const clearCall = (callId, reason) => {
+  const call = activeCalls.get(callId);
+  if (!call) return null;
+
+  if (call.timeout) {
+    clearTimeout(call.timeout);
+  }
+
+  activeCalls.delete(callId);
+
+  return { ...call, reason };
+};
 
 const parseCookies = (cookieHeader) => {
   if (!cookieHeader) {
@@ -102,6 +128,8 @@ const setupSockets = (httpServer) => {
       console.error('Presence increment error', error);
     });
 
+    socket.join(getUserRoom(socket.user.id));
+
     socket.on('chats:join', async ({ chatId }) => {
       try {
         const chat = await Chat.findById(chatId);
@@ -194,9 +222,170 @@ const setupSockets = (httpServer) => {
       }
     });
 
+    socket.on('call:init', async ({ chatId, toUserId }, callback) => {
+      try {
+        const chat = await Chat.findById(chatId);
+        if (!chat || chat.type !== 'direct') {
+          return callback && callback({ ok: false, reason: 'NOT_FOUND' });
+        }
+
+        const participants = (chat.participants || []).map((id) => id.toString());
+        const callerId = socket.user.id.toString();
+        const targetId = toUserId?.toString();
+
+        if (!participants.includes(callerId) || !participants.includes(targetId)) {
+          return callback && callback({ ok: false, reason: 'FORBIDDEN' });
+        }
+
+        const hasBlock = (chat.blocks || []).some(
+          (b) =>
+            (b.by && b.by.toString() === callerId && b.target && b.target.toString() === targetId) ||
+            (b.by && b.by.toString() === targetId && b.target && b.target.toString() === callerId)
+        );
+
+        if (hasBlock) {
+          return callback && callback({ ok: false, reason: 'BLOCKED' });
+        }
+
+        const targetPresence = onlineUsers.get(targetId);
+        if (!targetPresence || (targetPresence.count || 0) === 0) {
+          return callback && callback({ ok: false, reason: 'OFFLINE' });
+        }
+
+        const isTargetDnd = targetPresence.dndEnabled && (!targetPresence.dndUntil || new Date(targetPresence.dndUntil) > new Date());
+        if (isTargetDnd) {
+          return callback && callback({ ok: false, reason: 'DND' });
+        }
+
+        if (isUserBusy(targetId) || isUserBusy(callerId)) {
+          return callback && callback({ ok: false, reason: 'BUSY' });
+        }
+
+        const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const timeout = setTimeout(() => {
+          const cleared = clearCall(callId, 'TIMEOUT');
+          if (cleared) {
+            io.to(getUserRoom(callerId)).emit('call:cancel', { callId, reason: 'TIMEOUT' });
+            io.to(getUserRoom(targetId)).emit('call:cancel', { callId, reason: 'TIMEOUT' });
+          }
+        }, 30000);
+
+        activeCalls.set(callId, {
+          callId,
+          chatId: chat._id.toString(),
+          callerId,
+          calleeId: targetId,
+          timeout,
+        });
+
+        io.to(getUserRoom(targetId)).emit('call:ring', {
+          callId,
+          chatId: chat._id.toString(),
+          fromUserId: callerId,
+          fromName: socket.user.displayName || socket.user.username || 'Сотрудник',
+        });
+
+        return callback && callback({ ok: true, callId });
+      } catch (error) {
+        console.error('Call init error', error);
+        return callback && callback({ ok: false, reason: 'ERROR' });
+      }
+    });
+
+    socket.on('call:cancel', ({ callId }, callback) => {
+      const call = activeCalls.get(callId);
+      if (!call || call.callerId !== socket.user.id.toString()) {
+        if (callback) callback({ ok: false, reason: 'NOT_FOUND' });
+        return;
+      }
+
+      const cleared = clearCall(callId, 'CANCELLED');
+      if (cleared) {
+        io.to(getUserRoom(cleared.calleeId)).emit('call:cancel', { callId, reason: 'CANCELLED' });
+      }
+
+      if (callback) callback({ ok: true });
+    });
+
+    socket.on('call:decline', ({ callId }, callback) => {
+      const call = activeCalls.get(callId);
+      if (!call || call.calleeId !== socket.user.id.toString()) {
+        if (callback) callback({ ok: false, reason: 'NOT_FOUND' });
+        return;
+      }
+
+      const cleared = clearCall(callId, 'DECLINED');
+      if (cleared) {
+        io.to(getUserRoom(cleared.callerId)).emit('call:decline', { callId, reason: 'DECLINED' });
+      }
+
+      if (callback) callback({ ok: true });
+    });
+
+    socket.on('call:accept', ({ callId }, callback) => {
+      const call = activeCalls.get(callId);
+      if (!call || call.calleeId !== socket.user.id.toString()) {
+        if (callback) callback({ ok: false, reason: 'NOT_FOUND' });
+        return;
+      }
+
+      if (call.timeout) {
+        clearTimeout(call.timeout);
+        activeCalls.set(callId, { ...call, timeout: null });
+      }
+
+      io.to(getUserRoom(call.callerId)).emit('call:accept', { callId });
+
+      if (callback) callback({ ok: true });
+    });
+
+    const relayCallEvent = (eventName) => ({ callId, ...payload }, callback) => {
+      const call = activeCalls.get(callId);
+      if (!call) {
+        if (callback) callback({ ok: false, reason: 'NOT_FOUND' });
+        return;
+      }
+
+      const senderId = socket.user.id.toString();
+      if (senderId !== call.callerId && senderId !== call.calleeId) {
+        if (callback) callback({ ok: false, reason: 'FORBIDDEN' });
+        return;
+      }
+
+      const targetId = senderId === call.callerId ? call.calleeId : call.callerId;
+      io.to(getUserRoom(targetId)).emit(eventName, { callId, ...payload });
+
+      if (eventName === 'call:hangup') {
+        clearCall(callId, 'HANGUP');
+      }
+
+      if (callback) callback({ ok: true });
+    };
+
+    socket.on('call:sdp-offer', relayCallEvent('call:sdp-offer'));
+    socket.on('call:sdp-answer', relayCallEvent('call:sdp-answer'));
+    socket.on('call:ice', relayCallEvent('call:ice'));
+    socket.on('call:hangup', relayCallEvent('call:hangup'));
+
     socket.on('disconnect', () => {
       decrementPresence().catch((error) => {
         console.error('Presence decrement error', error);
+      });
+
+      const callsToClear = [];
+      activeCalls.forEach((call, callId) => {
+        if (call.callerId === socket.user.id.toString() || call.calleeId === socket.user.id.toString()) {
+          callsToClear.push(callId);
+        }
+      });
+
+      callsToClear.forEach((callId) => {
+        const cleared = clearCall(callId, 'DISCONNECTED');
+        if (cleared) {
+          const targetId =
+            cleared.callerId === socket.user.id.toString() ? cleared.calleeId : cleared.callerId;
+          io.to(getUserRoom(targetId)).emit('call:hangup', { callId });
+        }
       });
     });
   });

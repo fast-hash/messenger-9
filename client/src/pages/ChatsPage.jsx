@@ -8,8 +8,10 @@ import GroupDirectoryModal from '../components/GroupDirectoryModal';
 import GroupManageModal from '../components/GroupManageModal';
 import UserPicker from '../components/UserPicker';
 import ChatManagementModal from '../components/ChatManagementModal';
+import CallOverlay from '../components/CallOverlay';
 import { useAuthStore } from '../store/authStore';
 import { useChatStore } from '../store/chatStore';
+import { useCallStore } from '../store/callStore';
 import {
   createDirectChat,
   createGroupChat,
@@ -53,6 +55,7 @@ const ChatsPage = () => {
     auditLogs,
     loadAudit,
   } = useChatStore();
+  const { setSocket: setCallSocket, startCall, status: callStatus } = useCallStore();
 
   const [showChoice, setShowChoice] = useState(false);
   const [showDirect, setShowDirect] = useState(false);
@@ -77,7 +80,8 @@ const ChatsPage = () => {
     }
     connectSocket(user.id);
     loadChats(user.id);
-  }, [user, connectSocket, loadChats, reset, navigate]);
+    setCallSocket(null, null);
+  }, [user, connectSocket, loadChats, reset, navigate, setCallSocket]);
 
   useEffect(() => {
     setDndStatus(dndEnabled, dndUntil);
@@ -88,6 +92,14 @@ const ChatsPage = () => {
       fetchPins(selectedChatId);
     }
   }, [selectedChatId, fetchPins]);
+
+  useEffect(() => {
+    if (socket && user?.id) {
+      setCallSocket(socket, user.id);
+    } else {
+      setCallSocket(null, null);
+    }
+  }, [socket, user?.id, setCallSocket]);
 
   const selectedChat = useMemo(
     () => chats.find((chat) => chat.id === selectedChatId) || null,
@@ -353,6 +365,8 @@ const ChatsPage = () => {
             onTypingStart={(chatId) => socket?.emit('typing:start', { chatId })}
             onTypingStop={(chatId) => socket?.emit('typing:stop', { chatId })}
             socketConnected={!!socket}
+            callStatus={callStatus}
+            onStartCall={() => startCall(selectedChat)}
             onBlock={handleBlockChat}
             onUnblock={handleUnblockChat}
             pinnedMessageIds={pinnedByChat[selectedChatId] || selectedChat.pinnedMessageIds || []}
@@ -481,6 +495,7 @@ const ChatsPage = () => {
           onCancel={() => setConfirmState(null)}
         />
       )}
+      <CallOverlay />
     </Layout>
   );
 };

@@ -101,6 +101,8 @@ const ChatWindow = ({
   onTypingStart,
   onTypingStop,
   socketConnected,
+  callStatus,
+  onStartCall,
   onBlock,
   onUnblock,
   pinnedMessageIds,
@@ -146,6 +148,7 @@ const ChatWindow = ({
   const participants = chat?.participants || [];
   const safeMessages = Array.isArray(messages) ? messages : [];
   const currentId = currentUserId?.toString();
+  const callDisabled = chatType !== 'direct' || !socketConnected || !onStartCall || callStatus !== 'idle';
 
   useEffect(() => {
     setUnreadSeparatorMessageId(null);
@@ -688,6 +691,17 @@ const ChatWindow = ({
         </div>
 
         <div className="chat-window__actions">
+          {chatType === 'direct' && (
+            <button
+              type="button"
+              className="secondary-btn icon-btn icon-btn--circle"
+              onClick={() => !callDisabled && onStartCall && onStartCall()}
+              disabled={callDisabled}
+              title="Аудио-звонок"
+            >
+              📞
+            </button>
+          )}
           <button
             type="button"
             className="secondary-btn icon-btn icon-btn--circle"
@@ -1250,6 +1264,8 @@ ChatWindow.propTypes = {
   onTypingStart: PropTypes.func,
   onTypingStop: PropTypes.func,
   socketConnected: PropTypes.bool,
+  callStatus: PropTypes.string,
+  onStartCall: PropTypes.func,
   onBlock: PropTypes.func,
   onUnblock: PropTypes.func,
   pinnedMessageIds: PropTypes.arrayOf(PropTypes.string),
@@ -1282,6 +1298,8 @@ ChatWindow.defaultProps = {
   onTypingStart: () => {},
   onTypingStop: () => {},
   socketConnected: false,
+  callStatus: 'idle',
+  onStartCall: null,
   lastReadAt: null,
   onBlock: () => {},
   onUnblock: () => {},
