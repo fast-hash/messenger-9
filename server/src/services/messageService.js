@@ -62,6 +62,7 @@ const toMessageDto = (messageDoc, text) => {
       userId: reaction.userId ? reaction.userId.toString() : null,
     })),
     createdAt: messageDoc.createdAt ? messageDoc.createdAt.toISOString() : new Date().toISOString(),
+    createdAtMs: messageDoc.createdAt ? messageDoc.createdAt.getTime() : Date.now(),
     mentions: (messageDoc.mentions || []).map((id) => id.toString()),
     deletedForAll: !!messageDoc.deletedForAll,
     deletedAt: messageDoc.deletedAt,
